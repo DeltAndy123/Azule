@@ -29,5 +29,5 @@ jobs:
 
       - name: Azule
         run: |
-          echo $inputs.app
+          echo ${{ inputs.app }}
           ./azule -h
