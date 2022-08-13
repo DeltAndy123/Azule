@@ -1,0 +1,32 @@
+name: Modify IPA
+
+# Controls when the workflow will run
+on:
+  workflow_dispatch:
+    inputs: 
+      app:
+        description: The location of the IPA file to patch
+        required: true
+      tweaks:
+        description: The locations or bundle ids of the tweaks to inject
+      version:
+        description: Custom version for app
+      display-name:
+        description: Custom display name for app
+      name:
+        description: Custom name for app
+      support-devices:
+        type: boolean
+        description: Remove UISupportedDevices from app (Support more devices)
+
+jobs:
+  modify:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Azule
+        run: |
+          azule -h
