@@ -32,7 +32,7 @@ jobs:
 
       - name: Azule
         run: |
-          if [ ${{ inputs.supports-device }} ]
+          if [ ${{ inputs.support-devices }} ]
           then
             echo supports
           fi
