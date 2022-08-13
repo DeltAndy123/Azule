@@ -29,4 +29,4 @@ jobs:
 
       - name: Azule
         run: |
-          azule -h
+          ./azule -h
