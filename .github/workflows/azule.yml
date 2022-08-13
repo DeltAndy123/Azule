@@ -26,7 +26,14 @@ jobs:
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
+      
+      - name: Initialize
+        run: mkdir ./output
 
       - name: Azule
         run: |
-          ./azule ${{ inputs.app }}
+          if [ ${{ $inputs.supports-device }} ]
+          then
+            echo supports
+          fi
+        # ./azule -i ${{ inputs.app }} -o ./output -f ${{ inputs.tweaks }} -c ${{ inputs.version }} -p ${{ inputs.display-name }} -n ${{ inputs.name }}
