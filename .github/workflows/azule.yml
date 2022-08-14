@@ -52,5 +52,9 @@ jobs:
           then
             supportdevicesparam='-u'
           fi
-          echo ./azule -i ${{ inputs.app }} -o ./output $tweaksparam $versionparam $displaynameparam $nameparam $supportdevicesparam
-        # ./azule -i ${{ inputs.app }} -o ./output -f ${{ inputs.tweaks }} -c ${{ inputs.version }} -p ${{ inputs.display-name }} -n ${{ inputs.name }}
+          ./azule -i ${{ inputs.app }} -o ./output $tweaksparam $versionparam $displaynameparam $nameparam $supportdevicesparam
+        
+      - uses: actions/upload-artifact@v3
+        with:
+          name: patched-ipa
+          path: output/*.ipa
