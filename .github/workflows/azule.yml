@@ -34,6 +34,7 @@ jobs:
         run: |
           if [ ${{ inputs.support-devices }} == 'true' ]
           then
-            echo supports
+            supportdevices='-u'
           fi
+          echo $supportdevices
         # ./azule -i ${{ inputs.app }} -o ./output -f ${{ inputs.tweaks }} -c ${{ inputs.version }} -p ${{ inputs.display-name }} -n ${{ inputs.name }}
