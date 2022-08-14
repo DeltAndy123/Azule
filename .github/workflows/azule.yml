@@ -32,9 +32,25 @@ jobs:
 
       - name: Azule
         run: |
+          if [ ${{ inputs.tweaks }} != '' ]
+          then
+            tweaksparam='-f ${{ inputs.tweaks }}'
+          fi
+          if [ ${{ inputs.version }} != '' ]
+          then
+            versionparam='-c ${{ inputs.version }}'
+          fi
+          if [ ${{ inputs.display-name }} != '' ]
+          then
+            displaynameparam='-f ${{ inputs.displayname }}'
+          fi
+          if [ ${{ inputs.name }} != '' ]
+          then
+            nameparam='-f ${{ inputs.name }}'
+          fi
           if [ ${{ inputs.support-devices }} == 'true' ]
           then
-            supportdevices='-u'
+            supportdevicesparam='-u'
           fi
-          echo $supportdevices
+          echo ./azule -i ${{ inputs.app }} -o ./output $tweaksparam $versionparam $displaynameparam $nameparam $supportdevicesparam
         # ./azule -i ${{ inputs.app }} -o ./output -f ${{ inputs.tweaks }} -c ${{ inputs.version }} -p ${{ inputs.display-name }} -n ${{ inputs.name }}
