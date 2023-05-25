@@ -55,26 +55,6 @@ Verbose () {
     fi
 }
 
-expand () {
-    if ! [[ "$1" ]]; then
-        return 0
-    fi
-    current_dir="$PWD"
-    cd "$rootdir" || exit
-    process_var="$(echo "$1" | xargs)"
-
-    if [ -f "$process_var" ]; then
-        echo "$(cd "$(dirname "$process_var")" && pwd)/$(basename "$process_var")"
-    elif [ -d "$process_var" ]; then
-        cd "$process_var" && pwd
-    elif [[ "$process_var" == ?*/* ]] && [ -d "$(dirname "$process_var")" ]; then
-        echo "$(cd "$(dirname "$process_var")" && pwd)"/"${process_var##*/}"
-    else
-        echo "$process_var"
-    fi
-    cd "$current_dir" || exit
-}
-
 lib_basename () {
     if [[ "$1" == *.framework/* ]]; then
         echo "$(basename "$(dirname "$1")")/$(basename "$1")"
@@ -112,24 +92,6 @@ split_array () {
     export "${newarr?}"
 }
 
-resolve_symlink () {
-    if [ ! -h "$1" ]; then
-        echo "$1"
-    else
-        link="$(expr "$(command ls -ld -- "$1")" : '.*-> \(.*\)$')"
-        cd "$(dirname "$1")" || exit
-        resolve_symlink "$link" | sed "s|^\([^/].*\)\$|$(dirname "$1")/\1|"
-    fi
-}
-
-verlt() {
-    if [ "$1" = "$2" ]; then
-        return 1
-    else
-        [  "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]
-    fi
-}
-
 cleanup () {
     rm -rf "$dir"
     cd "$rootdir" || exit
@@ -141,183 +103,33 @@ cleanup () {
     fi
 }
 
-PackageIsAvailable () {
-    if ! [ "$1" ]; then
-        return 1
-    fi
-
-    if [ -z "$(curl -sSk "https://api.canister.me/v1/community/packages/search?responseFields=repository.uri&query=$1" | jq -r .data[])" ]; then
-        unset "sources[@]"
-        while read -r line; do
-            sources+=( "$line" )
-        done < <(grep -l "$1" "$dir"/packagelists/*)
-
-        if [ -z "${sources[*]}" ]; then
-            return 1
-        else
-            export sources
-        fi
-    fi
-}
-
-FetchDEB () {
-    unset fetched
-    if [ "$1" == "-o" ]; then
-        shift
-        outname="$1"
-        shift
-    else
-        outname="tweak.deb"
-    fi
-
-    Announce "Fetching $1..." -v
-    if [ -z "$ignore_canister" ] && [ -n "$(curl -sSk "https://api.canister.me/v1/community/packages/search?responseFields=repository.uri&query=$1" | jq -r .data[])" ]; then
-        canister="$(curl -sSLk "https://api.canister.me/v1/community/packages/search?responseFields=repository.uri,latestVersion&query=$1")"
-        repo="$(echo "$canister" | jq -r '.data[].repository.uri')"
-        clatestv="$(echo "$canister" | jq -r '.data[].latestVersion')"
-
-        hash="$(echo -n "$repo" | shasum | cut -d ' ' -f1)"
-        if [ ! -e "$dir/packagelists/$hash" ]; then
-            GetPackages "$repo"
-        fi
-        if [ -e "$dir/packagelists/$hash" ]; then
-            while read -r line; do
-                if [[ $line == "" ]]; then ((g++)) && s=1; fi
-                if [[ $s == 0 ]]; then
-                    clusters[$g]="${clusters[$g]}"$'\n'"$line"
-                else  
-                    clusters[$g]="$line"
-                    s=0 
-                fi
-            done < "$dir/packagelists/$hash" 
-
-            for j in "${clusters[@]}"; do
-                if [[ "$j" =~ Package:.*$1 ]]; then
-                    if [[ "$j" =~ Version:.*$clatestv ]]; then
-                        curl -sSLk "$repo/$(echo "$j" | grep 'Filename:' | sed 's/^.*: //')" -o "$outname"
-                        Verbose "Fetched $1" "Couldn't fetch $1" 1
-                        fetched=1
-                        break
-                    fi
-                fi
-            done
-        fi
-    fi
-
-    if [ -z "$fetched" ] && [ -n "${repos[*]}" ]; then
-        for j in "${sources[@]}"; do
-            unset "packages[@]"
-            unset "g"
-            while read -r line; do
-                if [[ $line == "" ]]; then ((g++)) && s=1; fi
-                if [[ $s == 0 ]]; then
-                    packages[$g]="${packages[$g]}"$'\n'"$line"
-                else  
-                    packages[$g]="$line"
-                    s=0 
-                fi
-            done < "$j"
-
-            for r in "${clean_sources[@]}"; do
-                if [ "$(basename "$j")" == "$(echo -n "$r" | shasum | cut -d ' ' -f1)" ]; then
-                    repo="$r"
-                fi
-            done
-
-            for p in "${packages[@]}"; do
-                if [[ "$p" =~ Package:.*$1 ]]; then
-                    currentversion="$(echo "$p" | grep "Version: *" | cut -d ' ' -f2)"
-                    if verlt "$latestversion" "$currentversion"; then
-                        latestversion="$currentversion"
-                        pfilename="$repo/$(echo "$p" | grep 'Filename:' | sed 's/^.*: //')"
-                    fi
-                fi
-            done
-        done
-        curl -sSLk "$pfilename" -o "$outname"
-        Verbose "Fetched $1" "Couldn't fetch $1" 30
-        fetched=1
-    fi
-
-    if [ -z "$fetched" ]; then
-        Announce "Couldn't find $1"
-        return 1
-    fi
-}
-
-GetControl () {
-    original_dir="$PWD"
-    ctrlid="$RANDOM"
-    mkdir -p "$dir/ctrltmp/$ctrlid"
-    cd "$dir/ctrltmp/$ctrlid" || exit
-    if [ "$os" == "iOS" ]; then
-        dpkg-deb -e "$1" "$dir/ctrltmp/$ctrlid" || status=1
-    else
-        ar -x "$1" || status=1
-        tar -C "$dir/ctrltmp/$ctrlid" -xf control.tar.* || status=1
-    fi
-    control="$(cat "$dir/ctrltmp/$ctrlid/control")"
-    cd "$original_dir" || exit
-    rm -rf "$dir/ctrltmp/$ctrlid"
-    export control
-    Verbose "Got Control of $(basename "$1")" "Couldn't get Control of $(basename "$1")" -v -x
-}
-
-GetPackages () {
-    for rurl in "$@"; do
-        (for pkgfile in Packages.gz Packages.zst Packages Packages.xz Packages.bz2; do
-            if curl -sLk -o /dev/null --head --fail "$rurl/$pkgfile"; then
-                hash="$(echo -n "$rurl" | shasum | cut -d ' ' -f1)"
-                case "$pkgfile" in
-                    Packages) curl -sSLk "$rurl/$pkgfile" -o "$dir/packagelists/$hash" && got_packages=1 ;;
-                    Packages.xz) curl -sSLk "$rurl/$pkgfile" | unxz -d > "$dir/packagelists/$hash" && got_packages=1 ;;
-                    Packages.gz) curl -sSLk "$rurl/$pkgfile" | gzip -d > "$dir/packagelists/$hash" && got_packages=1 ;;
-                    Packages.bz2) curl -sSLk "$rurl/$pkgfile" | bzip2 -d > "$dir/packagelists/$hash" && got_packages=1 ;;
-                    Packages.zst) curl -sSLk "$rurl/$pkgfile" | zstd -d > "$dir/packagelists/$hash" && got_packages=1 ;;
-                esac
-                break
-            fi
-        done
-        if [ -n "$got_packages" ]; then
-            Announce "Refreshed $rurl"
-            unset "got_packages"
-        else
-            Announce "Couldn't Refresh $rurl"
-        fi) &
-    done
-    wait
-}
-
-ipatool_auth () {
-    if [[ ! -e "$azule/ipatool_authenticated" || -n "$IPATOOL_EMAIL" ]]; then
-            
-        # VARIABLE CHECK
-        if [ -z "$IPATOOL_EMAIL" ]; then while
-            printf '[*] Apple ID: '
-            read -r IPATOOL_EMAIL
-            [ -z "$IPATOOL_EMAIL" ] && Announce "No Apple ID Provided"
-        do true; done; fi
-
-        if [ -z "$IPATOOL_PASSWORD" ]; then while
-            printf '[*] Password for Apple ID: '
-            read -r -s IPATOOL_PASSWORD
-            [ -z "$IPATOOL_PASSWORD" ] && Announce "No Password Provided"
-        do true; done; fi
-        printf "\n"
-
-        ipatool auth login -e "$IPATOOL_EMAIL" -p "$IPATOOL_PASSWORD" &>/dev/null
-        Verbose "Succesfully Authenticated" "Failed Authenticating" 34
-        echo -n > "$azule/ipatool_authenticated"
-    fi
-}
-
 decompress () {
     if [ -z "$full_unzipped" ]; then
         if [ -z "$1" ] || [ "$2" != "-n" ]; then
-            unzip -qq -n "$ipadir" "$1" -d "$dir"
+            unzip -qq -n "$ipadir" "$1" -d "$dir/"
         else
-            unzip -qq -o "$ipadir" "$1" -d "$dir" 
+            unzip -qq -o "$ipadir" "$1" -d "$dir/" 
         fi
+    fi
+}
+
+network_check(){
+    if [ -z "$net" ]; then
+        if curl -I --connect-timeout 5 google.com &>/dev/null; then
+            net=0
+        else
+            net=1
+        fi
+        export net
+    fi
+    return $net
+}
+
+verlt() {
+    if [ "$1" = "$2" ]; then
+        return 1
+    else
+        [  "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]
     fi
 }
 
@@ -326,7 +138,7 @@ help () {
     echo
     echo "Examples:"
 
-    if [ "$os" == "iOS" ]; then
+    if [ "$os" == "iOS" ] || [ -n "$unsafe_help" ]; then
         echo "  azule -n Foo -i com.example.foo -x appleid@example.com password123 -o ~/Foo/ -f com.alaise.example ~/Foo.bundle -a -m"
     fi
 
@@ -344,17 +156,34 @@ help () {
     echo "  -p [Name]                    Set custom Display Name for output ipa"
     echo "  -u                           Remove UISupportedDevices from app"
     echo "  -S                           Fakesigns iPA for use with AppSync"
-    echo "  -e                           Removes App Extensions" 
+    echo "  -e                           Removes App Extensions"
+
+    if [ "$os" == "iOS" ] || [ -n "$unsafe_help" ]; then
+        echo
+        echo "APT Module:"
+        echo "  -A [Source URL/Repo List]    Specify custom sources to get packages from"
+        echo "  -L                           Ignore packages from Canister"   
+        echo "  -k                           Ignore packages from APT Sources"
+        echo "  -d                           Don't install package dependencies"
+        echo "  -D                           Disable refreshing Procursus/Elcubratus repos"  
+    fi
+
+    if [ "$os" == "iOS" ] || [ -n "$unsafe_help" ]; then
+        echo
+        echo "Decrypt Module:"
+        echo "  -x [Apple ID] [Password]     Fetch and decrypt iPA with specified Apple ID"
+        echo "  -C [Country Code]            Specify country code for ipatool"
+        echo "  -g                           Force Update Apps"
+        echo "  -l                           Don't Update Outdated Apps"
+    fi
+
     echo
     echo "Others:"
     echo "  -n [Name]                    Specify a name for the Output iPA"
-    echo "  -A [Source URL/Repo List]    Specify custom sources to get packages from"
-    echo "  -L                           Ignore packages from Canister"   
-    echo "  -k                           Ignore packages from APT Sources"
-    echo "  -d                           Don't install package dependencies"
-    echo "  -D                           Disable refreshing Procursus/Elcubratus repos"  
+    echo "  -y                           Don't remove watch app"
+    echo "  -m                           Don't inject a hooking library"
 
-    if [ "$os" == "Linux" ]; then
+    if [[ "$os" == @(Linux_x86|Linux_ARM) ]]; then
         echo "  -R                           Redownload the latest substrate, substitute, and toolchain"
     else 
         echo "  -R                           Redownload the latest substrate and substitute"
@@ -364,33 +193,38 @@ help () {
     echo "  -s                           Silence Everything But Important Errors"
     echo "  -w                           Insert dylibs as weak"
     echo "  -r                           Skip Encryption Check"
-    echo "  -y                           Don't remove watch app"
-    echo "  -q                           Ignore errors"
-    echo "  -H                           Inject Libhooker in dylibs [Highly Discouraged]"
-    echo "  -j                           Allow for Azule to be ran as root [Discouraged]"
-    echo "  -z                           Use Legacy Compression (outputs smaller .ipa files, but runs slower)"
-    echo "  -h                           Print this help menu"
 
-    if [ "$os" == "iOS" ]; then
+    if [ -n "$unsafe_help" ]; then
+        echo "  -q                           Ignore errors [Discouraged]"
+        echo "  -j                           Allow for Azule to be ran as root [Discouraged]"
+    fi
+
+    echo "  -z                           Use Legacy Compression (outputs smaller .ipa files, but runs slower)"
+    echo "  -Z                           Don't compress output .ipa; Output .app"    
+    echo "  -h                           Print the help menu"
+    echo "  -H                           Print the complete help menu (incl. unsupported options)"
+
+    if [ "$os" != "iOS" ]; then
         echo
-        echo "iOS Only:"
-        echo "  -x [Apple ID] [Password]     Fetch and decrypt iPA with specified Apple ID"
-        echo "  -C [Country Code]            Specify country code for ipatool"
-        echo "  -g                           Force Update Apps"
-        echo "  -l                           Don't Update Outdated Apps"
-    else
-        echo
-        echo "MacOS/Linux/WSL Only:"
+        echo "MacOS/Linux Only:"
         echo "  -U                           Don't Update Azule on run"
         echo "  -F                           Forcefully update Azule"
     fi
+
     echo
     cleanup
 }
 
 # SET PLATFORM
 case "$(uname -s)" in
-    "Linux") os="Linux" ;;
+    "Linux") 
+        if [[ "$(lscpu | cut -d ":" -f2 | head -1 | xargs)" == "x86_64" ]]; then
+            os="Linux_x86" 
+        else
+            os="Linux_ARM"
+        fi
+    ;;
+
     "Darwin")
         if [[ "$(sw_vers -productName)" =~ ^(Mac OS X|macOS|macOS Server)$ ]]; then
             os="MacOS"
@@ -400,13 +234,9 @@ case "$(uname -s)" in
     ;;
 esac
 
-# ANNOUNCE PLATFORM
-Announce "Platform is $os" -v
-
-# PLATFORM-SPECIFIC FUNCTIONS
+# PLIST MANAGEMENT
 case "$os" in
     iOS)
-        country_code="US"
         RemovePlistKey () {
             plutil -remove -key "$1" "$2" &>/dev/null
         }
@@ -415,27 +245,19 @@ case "$os" in
             plutil -value "$1" -key "$2" "$3" &>/dev/null
         }
 
-        ExtractPlistValue () {
-            status=0
-            if [ -n "$3" ]; then
-                plutil -key "$1" "$2" >> tmp 2>/dev/null || status=1
-                plutil -convert xml1 tmp &>/dev/null || status=1
-                sed -n "s/.*<key>\(.*\)<\/key>.*/\1/p" tmp || status=1
-                rm tmp &>/dev/null || status=1
-            else
-                plutil -key "$1" "$2" 2>/dev/null || status=1
-            fi
-            return $status
+        ExtractPlistKey(){
+            plutil -key "$1" "$2" >> tmp 2>/dev/null || status=1
+            plutil -convert xml1 tmp &>/dev/null || status=1
+            sed -n "s/.*<key>\(.*\)<\/key>.*/\1/p" tmp || status=1
+            rm tmp &>/dev/null || status=1
         }
 
-        ExtractDEB () {
-            Announce "Extracting $(basename "$1")..."
-            dpkg -x "$1" "$dir/Tweak"
-            Verbose "Extracted $(basename "$1")" "Couldn't extract $(basename "$1")" 3
+        ExtractPlistValue () {
+            plutil -key "$1" "$2" 2>/dev/null
         }
     ;;
 
-    MacOS|Linux)
+    MacOS)
         RemovePlistKey () {
             plutil -remove "$1" "$2" &>/dev/null
         }
@@ -444,13 +266,8 @@ case "$os" in
             plutil -replace "$2" -string "$1" "$3" &>/dev/null
         }
 
-        ExtractPlistValue () {
-            if [ -n "$3" ]; then
-                psed="key"
-            else
-                psed="string"
-            fi
-            value="$(plutil -extract "$1" xml1 -o - "$2" | sed -n "s/.*<$psed>\(.*\)<\/$psed>.*/\1/p" 2>/dev/null)"
+        ExtractPlistKey(){
+            value="$(plutil -extract "$1" xml1 -o - "$2" | sed -n "s/.*<key>\(.*\)<\/key>.*/\1/p" 2>/dev/null)"
 
             if [ -n "$value" ]; then
                 echo "$value"
@@ -459,18 +276,127 @@ case "$os" in
             fi
         }
 
-        ExtractDEB () {
-            origin_dir="$PWD"
-            mkdir -p "$dir/debtemp/$1"
-            cd "$dir/debtemp/$1" || exit
-            Announce "Extracting $(basename "$1")..." -v
-            ar -x "$1" || status=1
-            tar -C "$dir/Tweak" -xf data.tar.* || status=1
-            Verbose "Extracted $(basename "$1")" "Couldn't extract $(basename "$1")" 5 -x
-            cd "$origin_dir" || exit
-            rm -rf "$dir/debtemp/$1"
-            return $status
+        ExtractPlistValue () {
+            value="$(plutil -extract "$1" xml1 -o - "$2" | sed -n "s/.*<string>\(.*\)<\/string>.*/\1/p" 2>/dev/null)"
+
+            if [ -n "$value" ]; then
+                echo "$value"
+            else
+                return 1
+            fi
         }
+
+        convert_to_plist () {
+            plutil -convert binary1 "$1"
+        }
+    ;;
+
+    Linux_ARM|Linux_x86)
+        RemovePlistKey () {
+            plistutil -i "$2" -o tmp -f xml
+            xmlstarlet ed -d "//key[text()='$1']" tmp > "$2"
+            plistutil -i "$2" -o "$2" -f binary
+        }
+
+        ReplacePlistValue () {
+            plistutil -i "$3" -o tmp -f xml
+            xmlstarlet ed -u "//key[text()='$2']/following-sibling::string[1]/text()" -v "$1" tmp > "$3"
+            plistutil -i "$3" -o "$3" -f binary
+        }
+
+        ExtractPlistKey(){
+            plistutil -i "$2" -o tmp -f xml
+            
+            value="$(xmllint --xpath "string(//plist/dict/dict/key)" tmp 2>/dev/null)"
+            rm tmp
+
+            if [ -n "$value" ]; then
+                echo "$value"
+            else
+                return 1
+            fi   
+        }
+
+        ExtractPlistValue () {
+            plistutil -i "$2" -o tmp -f xml
+            
+            value="$(xmllint --xpath "//key[text()='$1']/following-sibling::string[1]/text()" tmp 2>/dev/null)"
+            rm tmp
+
+            if [ -n "$value" ]; then
+                echo "$value"
+            else
+                return 1
+            fi   
+        }
+
+    convert_to_plist() {
+        local input_file="$1"
+        local xml_output="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        xml_output+="<plist version=\"1.0\">\n"
+        xml_output+="<dict>\n"
+
+        while IFS="=" read -r key value; do
+            if [[ -n "$key" && -n "$value" ]]; then
+                key="$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                value="$(echo "$value" | sed 's/^ *"\{0,1\}//;s/"\{0,1\} *$//')"
+                xml_output+="  <key>$key</key>\n"
+                xml_output+="  <string>$value</string>\n"
+            fi
+        done < "$input_file"
+
+        xml_output+="</dict>\n"
+        xml_output+="</plist>\n"
+
+        local tmp_plist="$(mktemp)"
+        printf "%b" "$xml_output" > "$tmp_plist"
+        plistutil -i "$tmp_plist" -o "$input_file" -f binary
+        rm "$tmp_plist"
+    }
+    ;;
+esac
+
+# DEB EXTRACTION
+if [[ "$os" == @(Linux_ARM|Linux_x86|MacOS) ]]; then
+
+    ExtractDEB () {
+        origin_dir="$PWD"
+        mkdir -p "$dir/debtemp/$1"
+        cd "$dir/debtemp/$1" || exit
+        Announce "Extracting $(basename "$1")..." -v
+        ar -x "$1" || status=1
+        tar -C "$dir/Tweak" -xf data.tar.* || status=1
+        Verbose "Extracted $(basename "$1")" "Couldn't extract $(basename "$1")" 5 -x
+        cd "$origin_dir" || exit
+        rm -rf "$dir/debtemp/$1"
+        return $status
+    }
+
+else
+
+    ExtractDEB () {
+        Announce "Extracting $(basename "$1")..."
+        dpkg -x "$1" "$dir/Tweak"
+        Verbose "Extracted $(basename "$1")" "Couldn't extract $(basename "$1")" 3
+    }
+fi
+
+# PLATFORM-SPECIFIC VARIABLES
+case "$os" in
+    MacOS)     
+        azule="$(dirname "$(realpath "$0")")"
+        PATH="$azule/bin/darwin:$PATH" 
+    ;;
+
+    iOS) 
+        PATH="/usr/lib/Azule/bin:$PATH"
+        azule="/usr/lib/Azule"
+    ;;
+
+    Linux_x86|Linux_ARM) 
+        azule="$(dirname "$(realpath "$0")")"
+        PATH="$azule/bin/linux:$PATH"
+        PATH="$azule/toolchain/bin:$PATH" 
     ;;
 esac
 
@@ -479,23 +405,23 @@ trap "cleanup" SIGINT
 trap "cleanup" EXIT
 
 # CLI ARGUEMENTS
-while getopts Hn:i:o:c:b:x:f:p:C:huSewsrDHqAdjRyUzgFLklv args; do
+while getopts n:i:o:c:b:x:f:p:C:huSewsrDHqAdjRyUzgmFZLklv args; do
 
     # STUFF WITH PARAMETERS
-    if [[ "$args" == @(x|n|b|p|i|o|c|f|A|H|z) ]]; then
+    if [[ "$args" == @(x|n|b|p|i|o|c|f|A|z|C) ]]; then
         tmp=( "$OPTARG" )
-        until [[ $(eval "echo \${$OPTIND}") =~ ^-.* ]] || [ -z "$(eval "echo \${$OPTIND}")" ]; do
+        until [[ "$(eval "echo \${$OPTIND}")" =~ ^-.* ]] || [ -z "$(eval "echo \${$OPTIND}")" ]; do
             tmp+=( "$(eval "echo \${$OPTIND}")" )
             OPTIND=$((OPTIND + 1))
         done
     fi
 
     # PLATFORM SPECIFIC
-    if [ "$os" = "iOS" ]; then
+    if [ "$os" == "iOS" ]; then
         if [[ "$args" == @(U|F) ]]; then
             Announce "-$args is not supported on your platform" 6
         fi
-    elif [[ "$args" == @(x|l|g|C) ]]; then
+    elif [[ "$args" == @(x|C|y|g|k|l) ]]; then
         Announce "-$args is not supported on your platform" 6
     fi
 
@@ -506,16 +432,18 @@ while getopts Hn:i:o:c:b:x:f:p:C:huSewsrDHqAdjRyUzgFLklv args; do
         b) bundle="${tmp[*]}" && run=1 ;;
         c) custom_version="${tmp[*]}" && run=1 ;;
         f) split_array files "${tmp[*]}" && run=1 ;;
-        i) ipadir="$(expand "${tmp[*]}")" ;;
+        i) ipadir="$(realpath -q "${tmp[*]}")" && [[ -z "$ipadir" && "$os" == "iOS" ]] && ipadir="${tmp[*]}" && run=1 ;;
         n) name="${tmp[*]}" ;;
-        o) outdir="$(expand "${tmp[*]}")" ;;
+        o) outdir="$(realpath -q "${tmp[*]}")" && [[ -z "$outdir" && "${tmp[*]}" != /* ]] && outdir="$(pwd)/${tmp[*]}" ;;
         p) displayname="${tmp[*]}" && run=1 ;;
         x) IPATOOL_EMAIL="${tmp[0]}" && unset "tmp[0]" && IPATOOL_PASSWORD="${tmp[*]}" ;;
         C) country_code="${tmp[*]}" ;;
 
         # SWITCHES
+        d) no_recurse=1 ;;
         e) remove_extensions=1 && run=1 ;;
         j) allow_root_run=1 ;;
+        m) no_inject_hl=1 ;;
         q) ignore_errors=1 ;;
         r) ignore_encrypted=1 ;;
         s) silent_run=1 ;;
@@ -524,156 +452,131 @@ while getopts Hn:i:o:c:b:x:f:p:C:huSewsrDHqAdjRyUzgFLklv args; do
         v) verbose=1 ;;
         y) no_remove_watchapp=1 ;;
         w) weak=1 ;;
-        H) inject_libhooker=1 ;;
         L) ignore_canister=1 ;;
-        d) no_recurse=1 ;;
         D) disable_dists=1 ;;
         z) legacy_compression=1 ;;
+        Z) output_unzipped=1 && legacy_compression=1 ;;
 
         # MACOS/LINUX ONLY SWITCHES
         U) no_update_azule=1 ;;
         F) force_update_azule=1 ;;
         R) redownload_resources=1 ;;
 
-        # iOS ONLY SWITCHES
+        # iOS ONLY SWITCHES // DECRYPT MODULE
         g) outdated=1 ;;
         k) no_apt_update=1 ;;
         l) ignore_outdated=1 ;;
         
         h) help ;;
+        H) unsafe_help=1 && help;;
         *) Announce "Invalid option: $*. Run 'azule -h' for help" 6 ;;
     esac
 done
 
+# ANNOUNCE PLATFORM
+Announce "Platform is $os" -v
+
 # USER CHECK
 if [ "$(id -u)" == "0" ] && [ -z "$allow_root_run" ]; then
-    Announce "Azule should not be ran as root. Use '-j' to overwrite" 36
+    Announce "Azule should not be run as root. Use '-j' to overwrite" 36
 fi 
-
-# PLATFORM-SPECIFIC VARIABLES
-case "$os" in
-    MacOS)     
-        azule="$(dirname "$(resolve_symlink "$0")")"
-        PATH="$azule/bin/darwin:$PATH" 
-    ;;
-
-    iOS) 
-        PATH="/usr/lib/Azule/bin:$PATH"
-        azule="/usr/lib/Azule"
-    ;;
-
-    Linux) 
-        azule="$(dirname "$(resolve_symlink "$0")")"
-        PATH="$azule/bin/linux:$PATH"
-        PATH="$azule/toolchain/bin:$PATH" 
-    ;;
-esac
 
 if [ -n "$no_update_azule" ]; then
     unset force_update_azule
 fi
 
 # INTEGRITY CHECKS, AND UPDATE CHECKS
-if curl -I google.com &>/dev/null; then 
-    cd "$azule" || exit
-    if [[ "$os" == @(MacOS|Linux) ]]; then
-        if [ -n "$force_update_azule" ]; then
-            git reset --hard HEAD >> /dev/null
-        fi
+if [ ! -e "$azule/lib" ] || [ ! "$(ls -A "$azule/toolchain" &>/dev/null)" ] || [ -z "$no_update_azule" ]; then
+    if network_check; then 
+        cd "$azule" || exit
+        if [[ "$os" == @(MacOS|Linux_x86|Linux_ARM) ]]; then
+            if [ -n "$force_update_azule" ]; then
+                git reset --hard HEAD >> /dev/null
+            fi
 
-        if [ -z "$no_update_azule" ] || [ -n "$force_update_azule" ]; then
-            Announce "Checking for Updates..." -v
-            git fetch -q
-            if [ "$(git rev-list HEAD...origin/main --count)" != "0" ]; then
-                Announce "Updating Azule..." -v
-                git pull -q
-                Verbose "Updated Azule" "Couldn't Update Azule" 29
-                exec "$(resolve_symlink "$0")" -U "$@"
-            else
-                Announce "Azule is Up to Date" -v
+            if [ -z "$no_update_azule" ] || [ -n "$force_update_azule" ]; then
+                Announce "Checking for Updates..." -v
+                git fetch -q
+                if [ "$(git rev-list HEAD...origin/main --count)" != "0" ]; then
+                    Announce "Updating Azule..." -v
+                    git pull -q
+                    Verbose "Updated Azule" "Couldn't Update Azule" 29
+                    exec "$(realpath "$0")" -U "$@"
+                else
+                    Announce "Azule is Up to Date" -v
+                fi
             fi
         fi
-    fi
 
-    if [ -n "$redownload_resources" ]; then
-        rm -rf lib toolchain
-    fi
-
-    if [ "$os" == "MacOS" ]; then
-        if ! xcode-select -p 1>/dev/null; then
-            xcode-select --install
+        if [ -n "$redownload_resources" ]; then
+            rm -rf lib toolchain
         fi
-    elif [ "$os" == "Linux" ]; then
-        mkdir -p "$azule/toolchain"
-        if [ ! "$(ls -A "$azule/toolchain")" ]; then
-            Announce "Fetching toolchain..."
+
+        if [ "$os" == "MacOS" ]; then
+            if ! xcode-select -p 1>/dev/null; then
+                xcode-select --install
+            fi
+        elif [[ "$os" == @(Linux_x86|Linux_ARM) ]]; then
+            source "$azule/modules/dependency_check"
+            if [ "$os" == "Linux_x86" ]; then
+                toolchain_url=https://github.com/kabiroberai/darwin-tools-linux/releases/download/v2.2.1/darwin-tools-ubuntu18.04.tar.gz
+            else
+                toolchain_url=https://github.com/kabiroberai/darwin-tools-linux/releases/download/v2.2.1/darwin-tools-ubuntu20.04-aarch64.tar.gz
+            fi
+
+            mkdir -p "$azule/toolchain"
+            if [ ! "$(ls -A "$azule/toolchain")" ]; then
+                Announce "Fetching toolchain..."
+                TMP=$(mktemp -d)
+                cd "$TMP" || exit
+                curl -LOk "$toolchain_url"
+                Announce "Fetched Toolchain"
+                Announce "Setting Up Toolchain..."
+                tar -xf *.tar.gz
+                mv "$TMP"/linux/iphone/* "$azule"/toolchain
+                cd "$azule" || exit
+                rm -rf "$TMP"
+                Announce "Set Up Toolchain"
+            fi
+        fi
+        
+        (if [ ! -d "$azule/lib/CydiaSubstrate.framework" ]; then
+            mkdir -p "$azule/lib"
+            Announce "Downloading CydiaSubstrate.framework..."
             TMP=$(mktemp -d)
             cd "$TMP" || exit
-            curl -LsSOk https://github.com/sbingner/llvm-project/releases/latest/download/linux-ios-arm64e-clang-toolchain.tar.lzma
-            Announce "Fetched Toolchain"
-            Announce "Setting Up Toolchain..."
-            tar -xf linux-ios-arm64e-clang-toolchain.tar.lzma
-            mv "$TMP"/ios-arm64e-clang-toolchain/* "$azule"/toolchain
+            curl -Lk https://apt.bingner.com/debs/1443.00/mobilesubstrate_0.9.7113_iphoneos-arm.deb -o substrate.deb
+            ar -x "substrate.deb"
+            tar --lzma --strip-components 3 -xf data.tar.lzma "./Library/Frameworks/CydiaSubstrate.framework" "./usr/lib" "./usr/include"
+            rm CydiaSubstrate.framework/CydiaSubstrate CydiaSubstrate.framework/Headers/CydiaSubstrate.h
+            mv "$TMP"/libsubstrate.dylib CydiaSubstrate.framework/CydiaSubstrate
+            mv substrate.h CydiaSubstrate.framework/Headers/CydiaSubstrate.h
+            mv CydiaSubstrate.framework "$azule"/lib/CydiaSubstrate.framework
+            convert_to_plist "$azule"/lib/CydiaSubstrate.framework/Info.plist
             cd "$azule" || exit
             rm -rf "$TMP"
-            Announce "Set Up Toolchain"
-        fi
-    fi
-    
-    (if [ ! -d "$azule/lib/CydiaSubstrate.framework" ]; then
-        mkdir -p "$azule/lib"
-        Announce "Downloading CydiaSubstrate.framework..."
-        TMP=$(mktemp -d)
-        cd "$TMP" || exit
-        curl -sSLk https://apt.bingner.com/debs/1443.00/mobilesubstrate_0.9.7113_iphoneos-arm.deb -o substrate.deb
-        ar -x "substrate.deb"
-        tar --lzma --strip-components 3 -xf data.tar.lzma "./Library/Frameworks/CydiaSubstrate.framework" "./usr/lib" "./usr/include"
-        rm CydiaSubstrate.framework/CydiaSubstrate CydiaSubstrate.framework/Headers/CydiaSubstrate.h
-        mv "$TMP"/libsubstrate.dylib CydiaSubstrate.framework/CydiaSubstrate
-        mv substrate.h CydiaSubstrate.framework/Headers/CydiaSubstrate.h
-        mv CydiaSubstrate.framework "$azule"/lib/CydiaSubstrate.framework
-        cd "$azule" || exit
-        rm -rf "$TMP"
-        plutil -convert binary1 "$azule/lib/CydiaSubstrate.framework/Info.plist"
-        Announce "Downloaded CydiaSubstrate.framework"
-    fi) &
+            Announce "Downloaded CydiaSubstrate.framework"
+        fi) &
 
-    (if [ ! -e "$azule/lib/libsubstitute.dylib" ]; then
-        TMP="$(mktemp -d)"
+        (if [ ! -e "$azule/lib/libsubstitute.dylib" ]; then
+            TMP="$(mktemp -d)"
+            cd "$TMP" || exit 
         cd "$TMP" || exit 
-        Announce "Downloading Substitute..."
-        curl -sSk https://apt.bingner.com/debs/1443.00/com.ex.substitute_2.2.3_iphoneos-arm.deb -o substitute.deb
-        ar -x "substitute.deb"
-        tar --lzma --strip-components 2 -xf data.tar.lzma "usr/lib"
-        mv libsubstitute.dylib "$azule/lib/libsubstitute.dylib"
-        Announce "Downloaded Substitute"
-    fi) &
-
-    (if [ ! -e "$azule/lib/Libhooker/libhooker.dylib" ] || [ ! -e "$azule/lib/Libhooker/libblackjack.dylib" ] || [ ! -e "$azule/lib/Libhooker/libsubstitute.dylib" ] || [ ! -e "$azule/lib/Libhooker/libsubstrate.dylib" ]; then
-        mkdir -p "$azule/lib/Libhooker"
-        Announce "Downloading Libhooker..."
-        TMP=$(mktemp -d)
-        cd "$TMP" || exit
-        curl -sSLk https://repo.theodyssey.dev/debs/org.coolstar.libhooker_1.6.9_iphoneos-arm.deb -o libhooker.deb
-        ar -x "libhooker.deb"
-        tar --strip-components 3 -xf data.tar.xz "./usr/lib/libblackjack.dylib" "./usr/lib/libsubstrate.dylib" "./usr/lib/libhooker.dylib" "./usr/lib/libsubstitute.dylib"
-        ldid -r libsubstrate.dylib libhooker.dylib libblackjack.dylib libsubstitute.dylib
-        install_name_tool -change /usr/lib/libhooker.dylib @rpath/libhooker.dylib libblackjack.dylib
-        install_name_tool -change /usr/lib/libhooker.dylib @rpath/libhooker.dylib libsubstitute.dylib
-        install_name_tool -change /usr/lib/libblackjack.dylib @rpath/libblackjack.dylib libsubstitute.dylib
-        install_name_tool -change /usr/lib/libhooker.dylib @rpath/libhooker.dylib libsubstrate.dylib
-        install_name_tool -change /usr/lib/libblackjack.dylib @rpath/libblackjack.dylib libsubstrate.dylib
-        install_name_tool -id @rpath/libhooker.dylib libhooker.dylib
-        install_name_tool -id @rpath/libblackjack.dylib libblackjack.dylib
-        install_name_tool -id @rpath/libsubstitute.dylib libsubstitute.dylib
-        install_name_tool -id @rpath/libsubstrate.dylib libsubstrate.dylib
-        mv libhooker.dylib libblackjack.dylib libsubstrate.dylib libsubstitute.dylib "$azule/lib/Libhooker"
-        cd "$azule" || exit
-        rm -rf "$TMP"
-        Announce "Downloaded Libhooker"
-    fi) &
-    wait
-    cd "$rootdir" || exit
+            cd "$TMP" || exit 
+        cd "$TMP" || exit 
+            cd "$TMP" || exit 
+        cd "$TMP" || exit 
+            cd "$TMP" || exit 
+            Announce "Downloading Substitute..."
+            curl -k https://apt.bingner.com/debs/1443.00/com.ex.substitute_2.2.3_iphoneos-arm.deb -o substitute.deb
+            ar -x "substitute.deb"
+            tar --lzma --strip-components 2 -xf data.tar.lzma "usr/lib"
+            mv libsubstitute.dylib "$azule/lib/libsubstitute.dylib"
+            Announce "Downloaded Substitute"
+        fi) &
+        wait
+        cd "$rootdir" || exit
+    fi
 fi
 
 # VARIABLE CHECK
@@ -681,7 +584,7 @@ if [ -z "$outdir" ]; then
     Announce "No Output Directory Specified. Run 'azule -h' for help" 27
 elif [ -z "$ipadir" ]; then
     Announce "No iPA Specified. Run 'azule -h' for help" 27
-elif [[ -z "$run" ]] && [[ "$os" != "iOS" || ( -e "$ipadir" && ( "$ipadir" == "*.ipa" || "$ipadir" == "*.app" ) ) ]] ; then
+elif [ -z "$run" ]; then
     Announce "No Modifiers Specified. Run 'azule -h' for help" 27
 fi
 
@@ -692,147 +595,15 @@ mkdir -p "$dir/Tweak"
 Verbose "Temporary Directory has been created" "Couldn't create Temporary Directory" 10 -v
 cd "$dir" || exit
 
-# INSTALLING UPDATES AND DECRYPTION
-if [ "$os" == "iOS" ] && [[ ! -e "$ipadir" || ( -e "$ipadir" && ! ( "$ipadir" == "*.ipa" || "$ipadir" == "*.app" ) ) ]]; then
-    ipadir="$(basename "$ipadir")"
-    if [ -z "$ignore_outdated" ]; then
-        Announce "Checking for App Updates..."
-
-        # CHECK IF APP IS INSTALLED
-        while read -r i; do
-            MCMMetadataIdentifier="$(ExtractPlistValue MCMMetadataIdentifier "$i")"
-            if [ "${MCMMetadataIdentifier,,}" = "${ipadir,,}" ]; then
-                info_plist="$(find "$(dirname "$i")"/*.app/ -maxdepth 1 -name Info.plist)"
-                thinned="$(ExtractPlistValue variantID "$(dirname "$i")/iTunesMetadata.plist")"
-                break
-            fi
-        done < <(find /var/containers/Bundle/Application -name .com.apple.mobile_container_manager.metadata.plist)
-        
-        # CHECK IF APP IS OUTDATED
-        if ! curl -I google.com &>/dev/null; then Announce "No Connection to the Internet" 26; fi
-        latestv="$(curl -s "http://itunes.apple.com/lookup?bundleId=$ipadir&country=$country_code" | jq -r '.results[].version')"
-        currentv="$(ExtractPlistValue CFBundleShortVersionString "$info_plist")"
-
-        # VARIABLE CHECK
-        if [ -z "$latestv" ] && [ -z "$currentv" ]; then Announce "Invalid App" 8; fi
-
-        # UPDATING OUTDATED APPS
-        if [ -n "$outdated" ] || { [ -n "$latestv" ] && [[ "$latestv" != "$currentv" || -n "$thinned" ]]; }; then
-            Announce "Update Available"
-            ipatool_auth
-
-            # DOWNLOAD AND INSTALL UPDATES
-            Announce "Downloading $ipadir..."
-            ipatool download -b "$ipadir" -c "$country_code" --purchase --output "$dir/$ipadir.ipa" 
-            status="$?"
-            if [ "$status" == "1" ]; then
-                rm -f "$azule/ipatool_authenticated"
-                ipatool_auth
-                ipatool download -b "$ipadir" -c "$country_code" --purchase --output "$dir/$ipadir.ipa"
-                status="$?"
-            fi
-            
-            Verbose "Downloaded $ipadir" "Couldn't Download $ipadir" 28 -x
-
-            # CHECK & PATCH MINIMUM VERSION AND TEMPORARILY REMOVE UISUPPORTEDDEVICES
-            mkdir -p "$dir/minverplist/"
-            unzip -qq "$dir/$ipadir.ipa" "Payload/*.app/Info.plist" -d "$dir/minverplist/"
-            cd "$dir/minverplist/" || exit
-            cp -a Payload/*.app/Info.plist "$dir"/minverplist/
-
-            UISupportedDevices1="$(ExtractPlistValue UISupportedDevices "$dir"/minverplist/Payload/*.app/Info.plist)"
-            if [ -n "$UISupportedDevices1" ]; then
-                RemovePlistKey UISupportedDevices Payload/*.app/Info.plist
-                Verbose "Temporarily Removed UISupportedDevices from app" "Couldn't remove UISupportedDevices from app" 37 -v 
-            fi
-
-            current_ios_version="$(sw_vers -productVersion)"
-            orig_min_version="$(ExtractPlistValue MinimumOSVersion "$dir"/minverplist/Payload/*.app/Info.plist)"
-            if verlt "$current_ios_version" "$orig_min_version"; then
-                ReplacePlistValue "$current_ios_version" MinimumOSVersion Payload/*.app/Info.plist
-                Verbose "Temporarily changed $ipadir's Minimum OS Version to $current_ios_version" "Couldn't change $ipadir's Minimum OS Version" 35 -v
-                changed_min_version=1
-            fi
-
-            if [ -n "$changed_min_version" ] || [ -n "$UISupportedDevices1" ]; then
-                zip -qq -u "$dir/$ipadir.ipa" Payload/*.app/Info.plist
-            fi
-
-            cd "$dir" || exit
-
-            Announce "Installing $ipadir ..."
-            appinst "$dir/$ipadir.ipa" &>/dev/null
-            Announce "Installed $ipadir"
-        else
-            Announce "No Updates Available"
-        fi
-    fi
-
-    # DECRYPTION: GET MAIN INFO.PLIST
-    while read -r i; do
-        MCMMetadataIdentifier="$(ExtractPlistValue MCMMetadataIdentifier "$i")"
-        if [ "${MCMMetadataIdentifier,,}" = "${ipadir,,}" ]; then
-            bfplist="$(find "$(dirname "$i")"/*.app/ -maxdepth 1 -name Info.plist)"
-            break
-        fi
-    done < <(find /var/containers/Bundle/Application -name .com.apple.mobile_container_manager.metadata.plist)
-
-    if [ -z "$bfplist" ]; then Announce "App Not Found" 8; fi
-
-    # DECRYPT
-    mkdir -p Payload
-    appname="$(basename "$(dirname "$bfplist")")"
-
-    while read -r i; do
-        CFBundleExecutable="$(ExtractPlistValue CFBundleExecutable "$i")"
-        DTPlatformName="$(ExtractPlistValue DTPlatformName "$i")"
-        if [ -n "$CFBundleExecutable" ] && [ -e "$(dirname "$i")/$CFBundleExecutable" ] && otool -l "$(dirname "$i")/$CFBundleExecutable" | grep -q 'cryptid 1' && [ "$DTPlatformName" != "watchos" ]; then
-            if [ -z "$dexec" ]; then
-
-                # CHOOSING FOULDECRYPT BINARY
-                ios_version="$(sw_vers -productVersion)"
-                if [[ "${ios_version%.*}" -lt "14" ]] || [[ ! -e "/.installed_taurine" && ! -e "/.installed_unc0ver" ]]; then
-                    decrypt="fouldecrypt.tfp0"
-                elif [ -e "/.installed_taurine" ]; then
-                    decrypt="fouldecrypt.kernrw"
-                elif [ -e "/.installed_unc0ver" ]; then
-                    decrypt="fouldecrypt.krw"
-                fi
-                
-                Announce "Chose $decrypt as decryptor" -v
-                Announce "Decrypting App..."
-            fi
-
-            mkdir -p "Payload/$(dirname "$i" | sed "s|^.*$appname|$appname|")"
-            Announce "Decrypting $CFBundleExecutable..." -v
-            "$decrypt" -v "$(dirname "$i")/$CFBundleExecutable" "Payload/$(dirname "$i" | sed "s|^.*$appname|$appname|")/$CFBundleExecutable" &>/dev/null
-            status="$?"
-            if [ "$status" != "0" ]; then
-                qv=$(( qv + 1 ))
-            fi
-            Verbose "Decrypted $CFBundleExecutable" "Couldn't Decrypt $CFBundleExecutable" -v -x
-            dexec=1
-        fi
-    done < <(find "$(dirname "$bfplist")" -name "Info.plist")
-
-    cp -a -n "$(dirname "$bfplist")" Payload
-    status="$qv"
-    Verbose "Finished Decryption" "Could Not decrypt $qv files. This may cause problems later on" -x
-
-    # RESTORING MIN VERSION
-    if [[ -n "$changed_min_version" || -n "$UISupportedDevices1" ]]; then
-        mv "$dir"/minverplist/Info.plist Payload/"$appname"/Info.plist
-        Verbose "Restored Original Plist Values" "Couldn't Restore Original Plist Values" -v
-    fi
-
-    full_unzipped=1
-
-elif [ -e "$ipadir" ]; then
+if [ -e "$ipadir" ]; then
     if [ "${ipadir: -4}" == ".app" ]; then
+
+        # COPYING APP CONTENTS
         mkdir -p "$dir/Payload"
         cp -R "$ipadir" "$dir/Payload" &>/dev/null
         Verbose "Copied App to Work Directory" "Couldn't Copy App to Work Directory" 11
         full_unzipped=1
+
     elif [ "${ipadir: -4}" == ".ipa" ] && [ -n "$legacy_compression" ]; then
 
         # EXTRACTING IPA
@@ -842,11 +613,17 @@ elif [ -e "$ipadir" ]; then
         full_unzipped=1
     fi
 else
-    Announce "Invalid App" 8
+    if [ "$os" == "iOS" ]; then
+        source "$azule"/modules/azule_decrypt
+    fi
+
+    if [ ! -e Payload ]; then
+        Announce "Invalid App" 8
+    fi
 fi
 
 # SETTING OUTPUT DIRECTORY AND NAME
-if [ -n "$run" ] || [ -n "$bfplist" ]; then
+if [ -n "$run" ] || [ -n "$foul_plist" ]; then
     if [[ "$outdir" != *".ipa" ]]; then
         if [ -z "$name" ]; then
             name="$(basename "$ipadir" .ipa)"
@@ -895,36 +672,47 @@ if [ -n "${files[*]}" ]; then
         unset "indexes[@]"
         while [[ "$x" -le "$max" ]]; do
             indexes+=( "$x" )
-            string+=" ${files[x]}"
-            if [ -e "$(expand "$string")" ] && [[ -z "${files[x+1]}" || ! -e "$(expand "$string ${files[x+1]}")" ]]; then
+            if [ -n "$string" ]; then
+                string+=" ${files[x]}"
+            else
+                string+="${files[x]}"
+            fi
+
+            if [ -e "$string" ]; then
+                e_string="$(cd "$rootdir" && realpath "$string")"
+            else
+                e_string="$string"
+            fi
+
+            if [ -e "$e_string" ] && [[ -z "${files[x+1]}" || ! -e "$e_string ${files[x+1]}" ]]; then
 
                 Announce "$(basename "$string" | xargs) will be imported" -v
 
-                case "$(expand "$string")" in
+                case "$e_string" in
                     *.deb) 
-                        ExtractDEB "$(expand "$string")"
-                        debs+=( "$(expand "$string")" )
+                        ExtractDEB "$e_string"
+                        debs+=( "$e_string" )
                     ;;
                     
                     *.dylib|*.framework)
-                        cp -a "$(expand "$string")" "$dir/Tweak"
-                        Verbose "Copied $(basename "$(expand "$string")") to work directory" "Couldn't Copy $(basename "$i") to work directory" 15 -v
+                        cp -a "$e_string" "$dir/Tweak"
+                        Verbose "Copied $(basename "$e_string") to work directory" "Couldn't Copy $(basename "$i") to work directory" 15 -v
                     ;;
 
                     *)
                         merge=1
                         mkdir -p "$dir/Custom"
-                        cp -a "$(expand "$string")" "$dir/Custom"
-                        Verbose "Copied $(basename "$(expand "$string")") to work directory" "Couldn't Copy $(basename "$i") to work directory" 16
+                        cp -a "$e_string" "$dir/Custom"
+                        Verbose "Copied $(basename "$e_string") to work directory" "Couldn't Copy $(basename "$i") to work directory" 16
                     ;;
                 esac
                 if [ -n "$custom_name" ]; then
-                    name+="+$(basename "$(expand "$string")")"
+                    name+="+$(basename "$e_string")"
                 fi
                 unset string
 
                 for g in "${indexes[@]}"; do
-                    unset "files[g]"
+                    unset "files[$g]"
                 done
                 unset "indexes[@]"
             fi
@@ -932,140 +720,8 @@ if [ -n "${files[*]}" ]; then
         done
     done
 
-    if [ -n "${files[*]}" ]; then
-
-        # NETWORK CHECK
-        if ! curl -I google.com &>/dev/null; then Announce "No Connection to the Internet" 26; fi
-
-        if [ -z "$no_apt_update" ]; then
-
-            # BUILDING PACKAGE LISTS
-            if [ "$os" == "iOS" ]; then
-                for url in /etc/apt/sources.list.d/*; do
-                    repos+=( "$url" )
-                done
-            fi
-
-            mkdir -p "$dir/packagelists"
-            for url in "${repos[@]}"; do
-                if [ -e "$(expand "$url")" ]; then
-                    while read -r line; do
-                        if [[ "$line" == */ ]]; then
-                            clean_sources+=( "${line%?}" )
-                        else
-                            clean_sources+=( "$line" )
-                        fi
-                    done < <(tr -s '[:space:]' '[\n*]' < "$(expand "$url")" | grep '^http' )
-                elif [[ "$url" == "http"* ]]; then
-                    if [[ "$url" == */ ]]; then
-                        clean_sources+=( "${url%?}" )
-                    else
-                        clean_sources+=( "$url" )
-                    fi
-                fi
-            done
-
-            for url in "${!clean_sources[@]}"; do
-                if [[ "${clean_sources[url]}" == http*://apt.thebigboss.org* ]]; then
-                    clean_sources[url]="http://apt.thebigboss.org/repofiles/cydia/dists/stable/main/binary-iphoneos-arm/"
-                else
-                    if [[ "${clean_sources[url]}" == http*://apt.procurs.us* ]]; then
-                        unset "clean_sources[url]"
-                        if [ -z "$disable_dists" ]; then
-                            for suite in 1500 1600 1700 1800; do
-                                clean_sources+=( "https://apt.procurs.us/dists/iphoneos-arm64/$suite/main/binary-iphoneos-arm/" )
-                            done
-                        fi
-                    fi
-
-                    if [[ "${clean_sources[url]}" == http*://apt.bingner.com* ]]; then
-                        unset "clean_sources[url]"
-                        if [ -z "$disable_dists" ]; then
-                            for suite in 478.23 550.58 800.00 1443.00; do
-                                clean_sources+=( "https://apt.bingner.com/dists/ios/$suite/main/binary-iphoneos-arm/" )
-                            done
-                        fi
-                    fi
-                fi
-            done
-            GetPackages "${clean_sources[@]}"
-        fi
-
-        mkdir -p "$dir/debs"
-        for i in "${files[@]}"; do
-            if PackageIsAvailable "$i"; then
-                unset "pkgs[@]"
-                if [ -n "$no_recurse" ]; then
-                    FetchDEB -o "$dir/debs/$i.deb" "$i" && pkgs+=( "$dir/debs/$i.deb" )
-                else
-                    # RECURSE AND RESOLVE DEPENDENCIES
-                    unset "array[@]"
-                    unset "indexi[@]"
-                    array=( "$i" )
-                    while [[ -n "${array[*]}" ]]; do
-                        for h in "${array[@]}"; do
-                            unset "dep_available"
-                            for x in "${debs[@]}"; do
-                                GetControl "$x"
-                                if [ "$h" == "$(echo "$control" | grep "Package:" | sed 's/^[^ ]* //')" ]; then
-                                    Announce "A local version of $h was supplied. Not fetching."
-                                    pkg="$x"
-                                    dep_available=1
-                                    break
-                                fi
-                            done
-
-                            if [ -z "$dep_available" ]; then
-                                pkg="$dir/debs/$h.deb"
-                                (FetchDEB -o "$pkg" "$h" && GetControl "$pkg") || (Announce "Couldn't find $pkg" && unset pkg)
-                            fi
-
-                            if [ -n "$pkg" ]; then
-                                pkgs+=( "$pkg" )
-                            fi
-                            split_array -d ", " array "$(echo "$control" | grep "Depends:" | sed 's/^[^ ]* //' | sed 's/([^()]*)//g')"
-
-                            k=0
-                            while [ -n "${array[k]}" ]; do
-                                if [ "${array[k]}" == "|" ]; then
-                                    if [[ "${array[k-1]}" == @(com.ex.substitute|org.coolstar.libhooker|mobilesubstrate|coreutils|firmware|cy+cpu.arm64|gsc.ipad) || "$(PackageIsAvailable "${array[k-1]}")" ]]; then
-                                        until [[ "${array[k+2]}" != "|" ]]; do
-                                            indexi+=( "$((k++))" "$((k+2))" )
-                                            ((k+2))
-                                        done
-                                        indexi+=( "$((k++))" "$((k+2))" )
-                                    else
-                                        ((k++))
-                                    fi
-                                else
-                                    ((k++))
-                                fi
-                            done
-
-                            for n in "${indexi[@]}"; do
-                                unset "array[$n]"
-                            done
-
-                            for x in "${!array[@]}"; do
-                                if [[ "${array[x]}" == @(com.ex.substitute|org.coolstar.libhooker|mobilesubstrate|coreutils|firmware|cy+cpu.arm64|gsc.ipad) ]]; then
-                                    unset "array[x]"
-                                fi
-                            done
-                        done
-                    done
-                fi
-
-                # EXTRACTING FETCHED DEBS
-                for deb in "${pkgs[@]}"; do
-                    if [ -n "$custom_name" ]; then
-                        name+="+$(basename "$deb")"
-                    fi
-                    ExtractDEB "$deb"
-                done
-            else
-                Announce "$i couldn't be found" 18
-            fi
-        done 
+    if [ "${#files[@]}" -ne 0 ] && [ -e "$azule/modules/azule_apt" ]; then
+        source "$azule/modules/azule_apt"
     fi
 
     # DYLIB SELECTION
@@ -1090,7 +746,7 @@ if [ -n "${files[*]}" ]; then
                 cp -a "$i" "$copy_path"
                 Verbose "Copied $(basename "$i") to app directory" "$(basename "$i") couldn't be copied to app directory" 16 -v
             else
-                split_array idtypes "$(ExtractPlistValue Filter "${i%.*}".plist key)"
+                split_array idtypes "$(ExtractPlistKey Filter "${i%.*}".plist)"
                 for idtype in "${idtypes[@]}"; do
                     case "$idtype" in
                         Bundles)
@@ -1146,18 +802,26 @@ if [ -n "${files[*]}" ]; then
         fi
     done < <(find "$dir/Tweak" "$dir/Custom" ! -type l -iname '*.framework' ! -path '*PreferenceBundles/*' ! -path '*.framework/*' 2>/dev/null)
 
-    # MERGING APPLICATION SUPPORT
-    while read -r i; do
-        mv "$i" "Payload/$appname/"
-        Verbose "Copied $(basename "$i") to app directory" "$(basename "$i") couldn't be copied to app directory" 16 -v
-    done < <(find "$dir/Tweak/Library/Application Support" -mindepth 2 -maxdepth 2 ! -type l ! -path '*.bundle/*' ! -path '*.framework/*' 2>/dev/null)
-
     # MOVING BUNDLES
     while read -r i; do
         rm -rf "Payload/$appname/$(basename "$i")"
         mv "$i" "Payload/$appname/"
         Verbose "Copied $(basename "$i") to app directory" "$(basename "$i") couldn't be copied to app directory" 16 -v
-    done < <(find "$dir/Tweak/Library/Application Support" ! -type l -iname '*.bundle' ! -path '*.bundle/*' ! -path '*.framework/*' 2>/dev/null)
+    done < <(find "$dir/Tweak/Library/Application Support" ! -type l -iname '*.bundle' ! -path '*.appex/*' ! -path '*.bundle/*' ! -path '*.framework/*' 2>/dev/null)
+
+    # MERGING APPLICATION SUPPORT
+    while read -r i; do
+        rm -rf "Payload/$appname/$(basename "$i")"
+        mv "$i" "Payload/$appname/"
+        Verbose "Copied $(basename "$i") to app directory" "$(basename "$i") couldn't be copied to app directory" 16 -v
+    done < <(find "$dir/Tweak/Library/Application Support" -mindepth 2 -maxdepth 2 ! -type l ! -path '*.appex/*' ! -path '*.bundle/*' ! -path '*.framework/*' 2>/dev/null)
+
+    # MOVING EXTENSIONS
+    while read -r i; do
+        rm -rf "Payload/$appname/PlugIns/$(basename "$i")"
+        mv "$i" "Payload/$appname/PlugIns/"
+        Verbose "Copied $(basename "$i") to app directory" "$(basename "$i") couldn't be copied to app directory" 16 -v
+    done < <(find "$dir/Tweak" "$dir/Custom" ! -type l -iname '*.appex' ! -path '*.appex/*' ! -path '*.bundle/*' ! -path '*.framework/*' 2>/dev/null)
 
     # FIXING LINKS
     for i in "${inject[@]}"; do
@@ -1194,24 +858,13 @@ if [ -n "${files[*]}" ]; then
     fi
 
     # INJECT HOOKING LIBRARY
-    if [ -n "${inject[*]}" ]; then
+    if [ -n "${inject[*]}" ] && [ -z "$no_inject_hl" ]; then
         for hookinglibrary in "CydiaSubstrate.framework/CydiaSubstrate" "libsubstitute.dylib"; do
-            if [ -n "$inject_libhooker" ]; then
-                hl_files=( "Libhooker/libhooker.dylib" "Libhooker/libblackjack.dylib" )
-                if [[ "$hookinglibrary" == @(CydiaSubstrate.framework/CydiaSubstrate|libsubstrate.dylib) ]]; then
-                    hl="libsubstrate.dylib"
-                    hl_files+=( "Libhooker/$hl"  )
-                else
-                    hl="$hookinglibrary"
-                    hl_files+=( "Libhooker/$hl" )
-                fi
+            hl="$hookinglibrary"
+            if [[ "$hl" =~ .framework ]]; then
+                hl_files+=( "$(dirname "$hl")" )
             else
-                hl="$hookinglibrary"
-                if [[ "$hl" =~ .framework ]]; then
-                    hl_files+=( "$(dirname "$hl")" )
-                else
-                    hl_files+=( "$hl" )
-                fi
+                hl_files+=( "$hl" )
             fi
             
             for hl_file in "${hl_files[@]}"; do
@@ -1263,46 +916,7 @@ if [ -n "${files[*]}" ]; then
     fi
 fi
 
-# REMOVING UISUPPORTEDDEVICES
-if [ -n "$remove_uisd" ]; then
-    UISupportedDevices="$(ExtractPlistValue UISupportedDevices Payload/"$appname"/Info.plist)"
-    if [ -n "$UISupportedDevices" ]; then
-        RemovePlistKey UISupportedDevices Payload/"$appname"/Info.plist
-        Verbose "Removed UISupportedDevices from app" "Couldn't remove UISupportedDevices from app"
-    fi
-fi
-
-# CHANGING BUNDLEID
-if [ -n "$bundle" ]; then
-    orig_bundleid="$(ExtractPlistValue CFBundleIdentifier Payload/"$appname"/Info.plist)"
-    checkvar "$orig_bundleid"
-    Verbose "Obtained Original BundleID" "Couldn't Obtain Original BundleID"
-
-    decompress "*Info.plist*" -n
-
-    while read -r i; do
-        CFBundleIdentifier="$(ExtractPlistValue CFBundleIdentifier "$i")"
-        if [[ "$CFBundleIdentifier" =~ $orig_bundleid ]]; then
-            CFBundleIdentifier="${CFBundleIdentifier//$orig_bundleid/$bundle}"
-            ReplacePlistValue "$CFBundleIdentifier" CFBundleIdentifier "$i"
-            status=$(( status + $? ))
-        fi
-    done < <(find Payload/"$appname" -name "Info.plist")
-    Verbose "Changed App BundleID to $bundle" "Couldn't Change App BundleID" -x
-fi
-
-# CHANGING DISPLAY NAME
-if [ -n "$displayname" ]; then
-    ReplacePlistValue "$displayname" CFBundleDisplayName Payload/"$appname"/Info.plist
-    Verbose "Changed App Display Name to $displayname" "Couldn't Change App Display Name"
-fi
-
-# CHANGING VERSION
-if [ -n "$custom_version" ]; then
-    ReplacePlistValue "$custom_version" CFBundleVersion Payload/"$appname"/Info.plist
-    ReplacePlistValue "$custom_version" CFBundleShortVersionString Payload/"$appname"/Info.plist
-    Verbose "Changed App Version to $custom_version" "Couldn't Change App Version"
-fi
+source "$azule/modules/plist_editing"
 
 # FAKESIGNING
 if [ -n "$fakesign" ]; then
@@ -1325,7 +939,7 @@ if [ -n "$run" ]; then
 fi
 
 # GENERATING IPA
-if [ -n "$run" ] || [ -n "$bfplist" ]; then
+if [ -n "$run" ] || [ -n "$foul_plist" ]; then
     if [ -n "$custom_name" ]; then
         outdir="$outdir/$name.ipa"
     fi
@@ -1338,14 +952,23 @@ if [ -n "$run" ] || [ -n "$bfplist" ]; then
         Announce "Shortened File Name"
     fi
 
+    # OUTPUT .APP
+    if [ -n "$output_unzipped" ]; then
+        outdir="${outdir%???}app"
+    fi
+
     # CREATING OUTPUT DIRECTORY
-    mkdir -p "$(dirname "$(expand "$outdir")")"
-    if [ -e "$outdir" ]; then rm -rf "$outdir"; fi
+    mkdir -p "$(dirname "$outdir")"
+    if [[ -e "$outdir" && "$outdir" == @(*.ipa|*.ipa) ]]; then rm -rf "$outdir"; fi
     Announce "Generating iPA..."
         
     if [ -n "$full_unzipped" ]; then
-        zip -r -qq "$outdir" Payload
-        status="$?"
+        if [ -n "$output_unzipped" ]; then
+            mv "Payload/$appname" "$outdir"
+        else
+            zip -r -qq "$outdir" Payload
+            status="$?"
+        fi
     else
         cp "$ipadir" "$outdir"
 
